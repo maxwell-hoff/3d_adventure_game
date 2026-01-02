@@ -102,3 +102,13 @@ The starfield is in `src/stars.js` and is intentionally designed to be extended 
 
 - **Seeded star generation**: change the `seed` passed in `index.html` to keep star layouts stable while you experiment.
 - **Constellations / patterns**: use `starSystem.addConstellation({ points: [...] })` to draw your own line patterns on top of the star dome.
+
+## Map (no “you are here”)
+Press **M** to open the map overlay.
+
+- The map is drawn from the same seeded world data as the 3D scene, so it matches what you see.
+- The map **does not show your current position**. Use landmarks + sky cues to figure out where you are.
+
+To extend the map/world:
+- `src/world.js`: add or move landmarks (also returned as data for the map)
+- `src/map.js`: change map styling, legend, and how landmarks/paths are drawn

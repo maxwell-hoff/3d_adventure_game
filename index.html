@@ -60,17 +60,21 @@
       Move: <span class="k">W</span><span class="k">A</span><span class="k">S</span><span class="k">D</span>
       &nbsp;|&nbsp; Sprint: <span class="k">Shift</span>
       &nbsp;|&nbsp; Jump: <span class="k">Space</span><br/>
+      Map: <span class="k">M</span> (does not show your location)<br/>
       Look: <span class="k">Mouse</span>
       &nbsp;|&nbsp; Release mouse: <span class="k">Esc</span><br/><br/>
       Goal: wander paths + trees, then look up at the star dome.
     </div>
   </div>
-  <div id="hint">Tip: the “sky” is a star dome. Later you can add constellations, moon phase, latitude, etc.</div>
+  <div id="hint">Tip: press <b>M</b> for the map (no “you are here”). Use landmarks + the sky to deduce your location.</div>
 
   <script type="module">
     import * as THREE from "three";
     import { PointerLockControls } from "three/addons/controls/PointerLockControls.js";
     import { createStarSystem } from "./src/stars.js";
+    import { createRng } from "./src/rng.js";
+    import { createWorld } from "./src/world.js";
+    import { createMapOverlay } from "./src/map.js";
 
     // --- Scene setup ---
     const scene = new THREE.Scene();
@@ -104,97 +108,20 @@
     warmFill.position.set(-30, 25, -40);
     scene.add(warmFill);
 
-    // --- Ground ---
-    const groundGeo = new THREE.PlaneGeometry(500, 500, 1, 1);
-    const groundMat = new THREE.MeshStandardMaterial({ color: 0x2f6b3a, roughness: 1.0 });
-    const ground = new THREE.Mesh(groundGeo, groundMat);
-    ground.rotation.x = -Math.PI / 2;
-    ground.receiveShadow = false;
-    scene.add(ground);
+    // --- World (seeded so the 2D map always matches the 3D scene) ---
+    const worldSeed = "world-seed-1";
+    const rng = createRng(worldSeed);
+    const world = createWorld({ scene, rng });
 
-    // Subtle ground variation (cheap: a few darker patches)
-    function addPatch(x, z, r, color) {
-      const g = new THREE.CircleGeometry(r, 24);
-      const m = new THREE.MeshStandardMaterial({ color, roughness: 1.0 });
-      const p = new THREE.Mesh(g, m);
-      p.rotation.x = -Math.PI / 2;
-      p.position.set(x, 0.01, z);
-      scene.add(p);
-    }
-    for (let i=0;i<70;i++){
-      addPatch((Math.random()-0.5)*350, (Math.random()-0.5)*350, 6+Math.random()*14, 0x2b5f34);
-    }
-
-    // --- Paths (simple strips) ---
-    const pathMat = new THREE.MeshStandardMaterial({ color: 0xa58b5a, roughness: 1.0 });
-    function addPathSegment(x, z, w, l, rotY=0) {
-      const seg = new THREE.Mesh(new THREE.BoxGeometry(w, 0.08, l), pathMat);
-      seg.position.set(x, 0.04, z);
-      seg.rotation.y = rotY;
-      scene.add(seg);
-      return seg;
-    }
-
-    // Make a few meandering paths
-    function carvePath(startX, startZ, steps, stepLen) {
-      let x = startX, z = startZ;
-      let ang = Math.random() * Math.PI * 2;
-      for (let i=0;i<steps;i++){
-        if (Math.random() < 0.12) ang += (Math.random()-0.5)*1.2;
-        const nx = x + Math.cos(ang) * stepLen;
-        const nz = z + Math.sin(ang) * stepLen;
-        const midX = (x + nx)/2;
-        const midZ = (z + nz)/2;
-        const rot = Math.atan2(nz - z, nx - x);
-        addPathSegment(midX, midZ, 5.0, stepLen + 0.5, -rot);
-        x = nx; z = nz;
+    // --- Map overlay (deliberately hides your current position) ---
+    const map = createMapOverlay({
+      world,
+      toggleKey: "m",
+      onOpen: () => {
+        // Ensure you can actually read the map without pointer lock fighting you.
+        if (controls.isLocked) controls.unlock();
       }
-    }
-    carvePath(-60, 20, 75, 7);
-    carvePath(40, -30, 75, 7);
-    carvePath(0, 0, 55, 8);
-
-    // --- Trees (cylinder trunk + cone canopy) ---
-    const trunkMat = new THREE.MeshStandardMaterial({ color: 0x5b3a22, roughness: 1.0 });
-    const leafMat = new THREE.MeshStandardMaterial({ color: 0x1f4f2c, roughness: 1.0 });
-
-    function addTree(x, z, s=1) {
-      const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.18*s, 0.22*s, 1.4*s, 10), trunkMat);
-      trunk.position.set(x, 0.7*s, z);
-
-      const canopy = new THREE.Mesh(new THREE.ConeGeometry(1.0*s, 2.2*s, 10), leafMat);
-      canopy.position.set(x, 2.0*s, z);
-
-      // small highlight blob to give some depth
-      const hi = new THREE.Mesh(new THREE.SphereGeometry(0.45*s, 10, 10),
-        new THREE.MeshStandardMaterial({ color: 0x2f6b3a, roughness: 1.0 })
-      );
-      hi.position.set(x-0.35*s, 2.2*s, z-0.25*s);
-
-      scene.add(trunk, canopy, hi);
-    }
-
-    // Scatter trees, but keep a loose “path corridor” clearer
-    function nearAnyPath(x, z) {
-      // crude: just keep a few hardcoded corridors for this demo
-      const corridors = [
-        {x:-60, z:20, r:22},
-        {x:40, z:-30, r:22},
-        {x:0, z:0, r:20}
-      ];
-      for (const c of corridors) {
-        const dx = x - c.x, dz = z - c.z;
-        if ((dx*dx + dz*dz) < (c.r*c.r)) return true;
-      }
-      return false;
-    }
-
-    for (let i=0;i<650;i++){
-      const x = (Math.random()-0.5)*360;
-      const z = (Math.random()-0.5)*360;
-      if (nearAnyPath(x,z) && Math.random() < 0.75) continue;
-      addTree(x, z, 0.75 + Math.random()*0.9);
-    }
+    });
 
     // --- Sky / stars (in separate module so you can extend with patterns later) ---
     const starSystem = createStarSystem({
@@ -262,8 +189,9 @@
 
         // keep player roughly within the world
         const p = controls.getObject().position;
-        p.x = THREE.MathUtils.clamp(p.x, -240, 240);
-        p.z = THREE.MathUtils.clamp(p.z, -240, 240);
+        const b = world.bounds ?? 240;
+        p.x = THREE.MathUtils.clamp(p.x, -b, b);
+        p.z = THREE.MathUtils.clamp(p.z, -b, b);
 
         // jump + gravity
         if (key.space && onGround) {
