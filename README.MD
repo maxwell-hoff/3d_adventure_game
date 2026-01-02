@@ -83,3 +83,22 @@ Starts with a minimal prototype to:
 Prove that the sky + navigation concept works
 
 Explore graphical limits without over-engineering
+
+
+To run:
+python -m http.server 8080
+
+## Running locally (recommended)
+Because this project uses ES modules (and Three.js addons), open it via a local HTTP server (not by double-clicking `index.html`):
+
+```powershell
+python -m http.server 8080
+```
+
+Then visit `http://localhost:8080/index.html`.
+
+## Stars / sky (where to extend)
+The starfield is in `src/stars.js` and is intentionally designed to be extended later:
+
+- **Seeded star generation**: change the `seed` passed in `index.html` to keep star layouts stable while you experiment.
+- **Constellations / patterns**: use `starSystem.addConstellation({ points: [...] })` to draw your own line patterns on top of the star dome.

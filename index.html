@@ -70,6 +70,7 @@
   <script type="module">
     import * as THREE from "three";
     import { PointerLockControls } from "three/addons/controls/PointerLockControls.js";
+    import { createStarSystem } from "./src/stars.js";
 
     // --- Scene setup ---
     const scene = new THREE.Scene();
@@ -195,69 +196,15 @@
       addTree(x, z, 0.75 + Math.random()*0.9);
     }
 
-    // --- Star dome (Points on a big sphere) ---
-    function makeStarDome() {
-      const starCount = 2400;
-      const positions = new Float32Array(starCount * 3);
-      const colors = new Float32Array(starCount * 3);
-
-      const radius = 900; // huge dome
-      const color = new THREE.Color();
-
-      for (let i=0;i<starCount;i++){
-        // random direction, but bias toward "upper hemisphere"
-        // (so stars are mostly above horizon)
-        const u = Math.random();
-        const v = Math.random();
-        const theta = 2 * Math.PI * u;
-        const phi = Math.acos(THREE.MathUtils.lerp(0.05, 1.0, v)); // 0..pi/2-ish
-        // convert to direction
-        const x = Math.sin(phi) * Math.cos(theta);
-        const y = Math.cos(phi); // up
-        const z = Math.sin(phi) * Math.sin(theta);
-
-        positions[i*3+0] = x * radius;
-        positions[i*3+1] = y * radius;
-        positions[i*3+2] = z * radius;
-
-        // color temperature-ish (slight blue/white variation)
-        const t = Math.random();
-        color.setRGB(
-          THREE.MathUtils.lerp(0.85, 1.0, t),
-          THREE.MathUtils.lerp(0.90, 1.0, t),
-          THREE.MathUtils.lerp(0.95, 1.0, 1-t)
-        );
-        colors[i*3+0] = color.r;
-        colors[i*3+1] = color.g;
-        colors[i*3+2] = color.b;
-      }
-
-      const geo = new THREE.BufferGeometry();
-      geo.setAttribute("position", new THREE.BufferAttribute(positions, 3));
-      geo.setAttribute("color", new THREE.BufferAttribute(colors, 3));
-
-      const mat = new THREE.PointsMaterial({
-        size: 2.0,
-        sizeAttenuation: true,
-        vertexColors: true,
-        transparent: true,
-        opacity: 0.9,
-        depthWrite: false
-      });
-
-      const points = new THREE.Points(geo, mat);
-      points.frustumCulled = false;
-      return points;
-    }
-
-    const starDome = makeStarDome();
-    scene.add(starDome);
-
-    // Also add a subtle dark sky gradient as a huge sphere behind stars
-    const skyGeo = new THREE.SphereGeometry(950, 32, 16);
-    const skyMat = new THREE.MeshBasicMaterial({ color: 0x04060a, side: THREE.BackSide });
-    const sky = new THREE.Mesh(skyGeo, skyMat);
-    scene.add(sky);
+    // --- Sky / stars (in separate module so you can extend with patterns later) ---
+    const starSystem = createStarSystem({
+      seed: "demo-seed-1",
+      starCount: 3000,
+      radius: 900,
+      skyRadius: 950,
+      starSize: 2.2
+    });
+    scene.add(starSystem.group);
 
     // --- Movement / simple physics ---
     const key = { w:false,a:false,s:false,d:false, shift:false, space:false };
@@ -288,8 +235,8 @@
     function animate() {
       const dt = Math.min(clock.getDelta(), 0.033);
 
-      // slow rotation of star dome (feels like sky drift)
-      starDome.rotation.y += dt * 0.02;
+      // slow rotation of sky (feels like sky drift)
+      starSystem.update(dt);
 
       if (controls.isLocked) {
         const speed = key.shift ? 8.0 : 4.5;
