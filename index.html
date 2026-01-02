@@ -1,0 +1,424 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Exploration Demo (Canvas)</title>
+  <style>
+    html, body { height: 100%; margin: 0; background:#0b0f14; overflow:hidden; }
+    #wrap { height: 100%; display:flex; align-items:center; justify-content:center; }
+    canvas { image-rendering: pixelated; border-radius: 12px; box-shadow: 0 10px 40px rgba(0,0,0,.5); }
+    .hud {
+      position: fixed; left: 16px; top: 16px;
+      font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial;
+      font-size: 14px; line-height: 1.35;
+      color: rgba(255,255,255,.9);
+      background: rgba(0,0,0,.35);
+      border: 1px solid rgba(255,255,255,.12);
+      padding: 10px 12px;
+      border-radius: 12px;
+      backdrop-filter: blur(6px);
+      max-width: 360px;
+    }
+    .hud b { color: #fff; }
+    .hint { opacity: .85; margin-top: 6px; }
+  </style>
+</head>
+<body>
+  <div class="hud">
+    <b>Controls</b><br/>
+    Move: <b>WASD</b> / Arrow Keys<br/>
+    Toggle star view: <b>Space</b><br/>
+    Toggle vague map: <b>M</b><br/>
+    <div class="hint">
+      Star view is meant to hint at “navigation by sky”. The map intentionally avoids showing your position.
+    </div>
+  </div>
+  <div id="wrap">
+    <canvas id="c" width="960" height="540"></canvas>
+  </div>
+
+<script>
+(() => {
+  const canvas = document.getElementById("c");
+  const ctx = canvas.getContext("2d");
+
+  // --- Camera / world ---
+  const TILE = 32;
+  const WORLD_W = 120;   // tiles
+  const WORLD_H = 120;   // tiles
+
+  // Simple seeded RNG for deterministic world generation
+  function mulberry32(seed) {
+    return function() {
+      let t = seed += 0x6D2B79F5;
+      t = Math.imul(t ^ (t >>> 15), t | 1);
+      t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+  const rand = mulberry32(123456);
+
+  // Tiles: 0 grass, 1 path
+  const tiles = new Uint8Array(WORLD_W * WORLD_H);
+
+  // Make a couple wide "paths" using random walk
+  function idx(x,y){ return y * WORLD_W + x; }
+
+  function carvePath(x, y, steps) {
+    let dir = 0;
+    for (let i=0; i<steps; i++) {
+      // occasionally turn
+      if (rand() < 0.08) dir = (dir + (rand()<0.5 ? -1 : 1) + 4) % 4;
+
+      // move
+      if (dir === 0) x++;
+      if (dir === 1) y++;
+      if (dir === 2) x--;
+      if (dir === 3) y--;
+
+      x = Math.max(2, Math.min(WORLD_W-3, x));
+      y = Math.max(2, Math.min(WORLD_H-3, y));
+
+      // carve a 3x3-ish path thickness
+      for (let oy=-1; oy<=1; oy++){
+        for (let ox=-1; ox<=1; ox++){
+          const xx = x+ox, yy = y+oy;
+          tiles[idx(xx,yy)] = 1;
+        }
+      }
+    }
+  }
+
+  // Carve a few paths
+  carvePath(Math.floor(WORLD_W*0.2), Math.floor(WORLD_H*0.6), 900);
+  carvePath(Math.floor(WORLD_W*0.7), Math.floor(WORLD_H*0.3), 900);
+  carvePath(Math.floor(WORLD_W*0.5), Math.floor(WORLD_H*0.5), 900);
+
+  // Place trees (simple circles), avoid paths
+  const trees = [];
+  for (let i=0; i<1800; i++){
+    const x = Math.floor(rand()*WORLD_W);
+    const y = Math.floor(rand()*WORLD_H);
+    if (tiles[idx(x,y)] === 1) continue;
+    // keep some open-ish space
+    if (rand() < 0.35) continue;
+    trees.push({x, y, r: 0.35 + rand()*0.35});
+  }
+
+  // --- Player ---
+  const player = {
+    x: WORLD_W * TILE * 0.5,
+    y: WORLD_H * TILE * 0.5,
+    r: 11,
+    speed: 170 // px/sec
+  };
+
+  // --- Input ---
+  const keys = new Set();
+  window.addEventListener("keydown", (e) => {
+    if (e.repeat) return;
+    keys.add(e.key.toLowerCase());
+    if (e.key === " ") { e.preventDefault(); starView = !starView; }
+    if (e.key.toLowerCase() === "m") { showMap = !showMap; }
+  });
+  window.addEventListener("keyup", (e) => keys.delete(e.key.toLowerCase()));
+
+  // --- View toggles ---
+  let starView = false;
+  let showMap = false;
+
+  // --- Stars ---
+  const stars = [];
+  const STAR_COUNT = 700;
+  const starRand = mulberry32(99999);
+  for (let i=0;i<STAR_COUNT;i++){
+    // distribute on a disk, bias outward a bit
+    const a = starRand()*Math.PI*2;
+    const r = Math.pow(starRand(), 0.45); // bias
+    stars.push({
+      a,
+      r,
+      m: 0.4 + starRand()*0.6, // magnitude-ish
+      tw: starRand()*Math.PI*2
+    });
+  }
+  // A simple "constellation" (indices into stars)
+  const constellation = [12, 98, 201, 307, 402, 511, 615];
+
+  // --- Render helpers ---
+  function clamp(v,a,b){ return Math.max(a, Math.min(b, v)); }
+
+  function drawTile(x, y, t, camX, camY) {
+    const sx = x*TILE - camX;
+    const sy = y*TILE - camY;
+
+    if (t === 0) {
+      // grass
+      ctx.fillStyle = "#2f6b3a";
+      ctx.fillRect(sx, sy, TILE, TILE);
+
+      // little grass noise
+      if (((x*31 + y*17) & 7) === 0) {
+        ctx.fillStyle = "rgba(255,255,255,0.03)";
+        ctx.fillRect(sx+6, sy+10, 2, 6);
+      }
+    } else {
+      // path
+      ctx.fillStyle = "#a58b5a";
+      ctx.fillRect(sx, sy, TILE, TILE);
+      ctx.fillStyle = "rgba(0,0,0,0.12)";
+      ctx.fillRect(sx, sy+TILE-3, TILE, 3);
+    }
+  }
+
+  function drawTree(tx, ty, rr, camX, camY) {
+    const cx = tx*TILE + TILE/2 - camX;
+    const cy = ty*TILE + TILE/2 - camY;
+
+    // trunk
+    ctx.fillStyle = "#5b3a22";
+    ctx.fillRect(cx-2, cy+6, 4, 10);
+
+    // canopy
+    ctx.beginPath();
+    ctx.fillStyle = "#1f4f2c";
+    ctx.arc(cx, cy+2, TILE*rr, 0, Math.PI*2);
+    ctx.fill();
+
+    // highlight
+    ctx.beginPath();
+    ctx.fillStyle = "rgba(255,255,255,0.07)";
+    ctx.arc(cx-6, cy-4, TILE*rr*0.55, 0, Math.PI*2);
+    ctx.fill();
+  }
+
+  function drawPlayer(camX, camY) {
+    const px = player.x - camX;
+    const py = player.y - camY;
+
+    ctx.beginPath();
+    ctx.fillStyle = "#2b2f38";
+    ctx.arc(px, py+2, player.r+2, 0, Math.PI*2);
+    ctx.fill();
+
+    ctx.beginPath();
+    ctx.fillStyle = "#d6caa8";
+    ctx.arc(px, py, player.r, 0, Math.PI*2);
+    ctx.fill();
+
+    // direction "nose" based on velocity last frame
+    ctx.beginPath();
+    ctx.fillStyle = "rgba(0,0,0,0.25)";
+    ctx.arc(px+6, py-2, 3, 0, Math.PI*2);
+    ctx.fill();
+  }
+
+  function drawStars(dt) {
+    ctx.fillStyle = "#05070c";
+    ctx.fillRect(0,0,canvas.width,canvas.height);
+
+    // slight rotation over time
+    starAngle += dt*0.07;
+
+    // horizon glow
+    const grd = ctx.createLinearGradient(0, canvas.height*0.55, 0, canvas.height);
+    grd.addColorStop(0, "rgba(0,0,0,0)");
+    grd.addColorStop(1, "rgba(20,40,70,0.25)");
+    ctx.fillStyle = grd;
+    ctx.fillRect(0,0,canvas.width,canvas.height);
+
+    // stars in a "dome"
+    const cx = canvas.width/2;
+    const cy = canvas.height*0.62;
+    const R = Math.min(canvas.width, canvas.height)*0.78;
+
+    for (let i=0;i<stars.length;i++){
+      const s = stars[i];
+      const a = s.a + starAngle;
+      const rr = s.r;
+
+      const x = cx + Math.cos(a) * rr * R;
+      const y = cy - Math.sin(a) * rr * R; // up
+
+      // twinkle
+      s.tw += dt*(0.6 + s.m*0.5);
+      const tw = (Math.sin(s.tw)*0.5 + 0.5);
+
+      const size = 0.6 + (1.9 * (1 - s.m)) + tw*0.6;
+      const alpha = 0.25 + (1 - s.m)*0.55 + tw*0.15;
+
+      ctx.fillStyle = `rgba(220,235,255,${alpha})`;
+      ctx.fillRect(x, y, size, size);
+    }
+
+    // draw a simple constellation line
+    ctx.lineWidth = 1.5;
+    ctx.strokeStyle = "rgba(160,200,255,0.45)";
+    ctx.beginPath();
+    for (let k=0;k<constellation.length;k++){
+      const s = stars[constellation[k]];
+      const a = s.a + starAngle;
+      const rr = s.r;
+      const x = cx + Math.cos(a) * rr * R;
+      const y = cy - Math.sin(a) * rr * R;
+      if (k===0) ctx.moveTo(x,y); else ctx.lineTo(x,y);
+    }
+    ctx.stroke();
+
+    // little caption
+    ctx.fillStyle = "rgba(255,255,255,0.85)";
+    ctx.font = "16px ui-sans-serif, system-ui";
+    ctx.fillText("Star view (press Space to return)", 20, 32);
+    ctx.fillStyle = "rgba(255,255,255,0.6)";
+    ctx.font = "13px ui-sans-serif, system-ui";
+    ctx.fillText("Imagine you learn these constellations to orient yourself.", 20, 52);
+  }
+
+  function drawVagueMap() {
+    // Vague map: shows only major paths as abstract blobs; no player marker.
+    const pad = 18;
+    const w = 260, h = 180;
+    const x0 = canvas.width - w - pad;
+    const y0 = pad;
+
+    ctx.save();
+    ctx.globalAlpha = 0.92;
+    ctx.fillStyle = "rgba(0,0,0,0.45)";
+    ctx.fillRect(x0, y0, w, h);
+    ctx.strokeStyle = "rgba(255,255,255,0.15)";
+    ctx.strokeRect(x0, y0, w, h);
+
+    ctx.fillStyle = "rgba(255,255,255,0.85)";
+    ctx.font = "13px ui-sans-serif, system-ui";
+    ctx.fillText("Map (deliberately vague)", x0+10, y0+20);
+
+    // Downsample world to a mini-grid and draw only path density
+    const miniW = 52, miniH = 30;
+    const cellW = (w-20)/miniW;
+    const cellH = (h-40)/miniH;
+
+    for (let my=0; my<miniH; my++){
+      for (let mx=0; mx<miniW; mx++){
+        // sample a block
+        const sx = Math.floor(mx/miniW * WORLD_W);
+        const sy = Math.floor(my/miniH * WORLD_H);
+
+        // small neighborhood density
+        let count = 0;
+        for (let oy=0; oy<2; oy++){
+          for (let ox=0; ox<2; ox++){
+            const xx = clamp(sx+ox,0,WORLD_W-1);
+            const yy = clamp(sy+oy,0,WORLD_H-1);
+            if (tiles[idx(xx,yy)] === 1) count++;
+          }
+        }
+        if (count === 0) continue;
+
+        const a = 0.08 + count*0.06;
+        ctx.fillStyle = `rgba(220,200,150,${a})`;
+        ctx.fillRect(x0+10 + mx*cellW, y0+30 + my*cellH, cellW, cellH);
+      }
+    }
+
+    ctx.fillStyle = "rgba(255,255,255,0.55)";
+    ctx.font = "12px ui-sans-serif, system-ui";
+    ctx.fillText("No 'you are here'. Learn landmarks + stars.", x0+10, y0+h-10);
+
+    ctx.restore();
+  }
+
+  // --- Main loop ---
+  let last = performance.now();
+  let starAngle = 0;
+
+  function tick(now) {
+    const dt = Math.min(0.033, (now - last) / 1000);
+    last = now;
+
+    if (!starView) {
+      // movement
+      let vx = 0, vy = 0;
+      const up = keys.has("w") || keys.has("arrowup");
+      const dn = keys.has("s") || keys.has("arrowdown");
+      const lf = keys.has("a") || keys.has("arrowleft");
+      const rt = keys.has("d") || keys.has("arrowright");
+
+      if (up) vy -= 1;
+      if (dn) vy += 1;
+      if (lf) vx -= 1;
+      if (rt) vx += 1;
+
+      if (vx || vy) {
+        const len = Math.hypot(vx, vy);
+        vx /= len; vy /= len;
+        player.x += vx * player.speed * dt;
+        player.y += vy * player.speed * dt;
+      }
+
+      // clamp to world bounds
+      player.x = clamp(player.x, 12, WORLD_W*TILE - 12);
+      player.y = clamp(player.y, 12, WORLD_H*TILE - 12);
+
+      // camera centers on player
+      const camX = clamp(player.x - canvas.width/2, 0, WORLD_W*TILE - canvas.width);
+      const camY = clamp(player.y - canvas.height/2, 0, WORLD_H*TILE - canvas.height);
+
+      // background
+      ctx.fillStyle = "#1a2a22";
+      ctx.fillRect(0,0,canvas.width,canvas.height);
+
+      // visible tile range
+      const xStart = Math.floor(camX / TILE) - 1;
+      const yStart = Math.floor(camY / TILE) - 1;
+      const xEnd = xStart + Math.ceil(canvas.width / TILE) + 3;
+      const yEnd = yStart + Math.ceil(canvas.height / TILE) + 3;
+
+      for (let y=yStart; y<yEnd; y++){
+        if (y<0 || y>=WORLD_H) continue;
+        for (let x=xStart; x<xEnd; x++){
+          if (x<0 || x>=WORLD_W) continue;
+          drawTile(x, y, tiles[idx(x,y)], camX, camY);
+        }
+      }
+
+      // draw trees (cheap cull)
+      for (const t of trees) {
+        const px = t.x*TILE - camX;
+        const py = t.y*TILE - camY;
+        if (px < -TILE || py < -TILE || px > canvas.width+TILE || py > canvas.height+TILE) continue;
+        drawTree(t.x, t.y, t.r, camX, camY);
+      }
+
+      // player
+      drawPlayer(camX, camY);
+
+      // subtle vignette
+      const g = ctx.createRadialGradient(canvas.width/2, canvas.height/2, canvas.height*0.15, canvas.width/2, canvas.height/2, canvas.height*0.65);
+      g.addColorStop(0, "rgba(0,0,0,0)");
+      g.addColorStop(1, "rgba(0,0,0,0.35)");
+      ctx.fillStyle = g;
+      ctx.fillRect(0,0,canvas.width,canvas.height);
+
+      if (showMap) drawVagueMap();
+
+      // label
+      ctx.fillStyle = "rgba(255,255,255,0.85)";
+      ctx.font = "16px ui-sans-serif, system-ui";
+      ctx.fillText("Exploration view", 20, canvas.height - 22);
+      ctx.fillStyle = "rgba(255,255,255,0.6)";
+      ctx.font = "13px ui-sans-serif, system-ui";
+      ctx.fillText("Try navigating using paths + tree clusters. Star view is separate (Space).", 20, canvas.height - 5);
+
+    } else {
+      drawStars(dt);
+    }
+
+    requestAnimationFrame(tick);
+  }
+
+  requestAnimationFrame(tick);
+})();
+</script>
+</body>
+</html>
