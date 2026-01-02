@@ -3,422 +3,350 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Exploration Demo (Canvas)</title>
-  <style>
-    html, body { height: 100%; margin: 0; background:#0b0f14; overflow:hidden; }
-    #wrap { height: 100%; display:flex; align-items:center; justify-content:center; }
-    canvas { image-rendering: pixelated; border-radius: 12px; box-shadow: 0 10px 40px rgba(0,0,0,.5); }
-    .hud {
-      position: fixed; left: 16px; top: 16px;
-      font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial;
-      font-size: 14px; line-height: 1.35;
-      color: rgba(255,255,255,.9);
-      background: rgba(0,0,0,.35);
-      border: 1px solid rgba(255,255,255,.12);
-      padding: 10px 12px;
-      border-radius: 12px;
-      backdrop-filter: blur(6px);
-      max-width: 360px;
+  <title>3D Navigation + Stars (Three.js)</title>
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+        "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+      }
     }
-    .hud b { color: #fff; }
-    .hint { opacity: .85; margin-top: 6px; }
+  </script>
+  <style>
+    html, body { height: 100%; margin: 0; background: #000; overflow: hidden; }
+    #overlay {
+      position: fixed; inset: 0;
+      display: grid; place-items: center;
+      font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial;
+      color: rgba(255,255,255,0.92);
+      background: radial-gradient(ellipse at center, rgba(0,0,0,0.45), rgba(0,0,0,0.85));
+      cursor: pointer;
+      user-select: none;
+    }
+    #panel {
+      width: min(560px, calc(100vw - 32px));
+      border-radius: 16px;
+      padding: 18px 18px 14px;
+      background: rgba(0,0,0,0.45);
+      border: 1px solid rgba(255,255,255,0.14);
+      box-shadow: 0 10px 40px rgba(0,0,0,0.6);
+      backdrop-filter: blur(6px);
+      line-height: 1.35;
+    }
+    #panel h1 { font-size: 18px; margin: 0 0 10px; }
+    #panel .k { display: inline-block; padding: 2px 6px; border-radius: 6px;
+      border: 1px solid rgba(255,255,255,0.18); background: rgba(255,255,255,0.06);
+      font-weight: 600;
+    }
+    #hint {
+      position: fixed; left: 14px; bottom: 12px;
+      font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial;
+      color: rgba(255,255,255,0.85);
+      background: rgba(0,0,0,0.35);
+      border: 1px solid rgba(255,255,255,0.12);
+      border-radius: 12px;
+      padding: 10px 12px;
+      max-width: 520px;
+      backdrop-filter: blur(6px);
+      pointer-events: none;
+    }
   </style>
 </head>
 <body>
-  <div class="hud">
-    <b>Controls</b><br/>
-    Move: <b>WASD</b> / Arrow Keys<br/>
-    Toggle star view: <b>Space</b><br/>
-    Toggle vague map: <b>M</b><br/>
-    <div class="hint">
-      Star view is meant to hint at “navigation by sky”. The map intentionally avoids showing your position.
+  <div id="overlay">
+    <div id="panel">
+      <h1>3D Exploration Demo</h1>
+      Click to start (locks mouse).<br/><br/>
+      Move: <span class="k">W</span><span class="k">A</span><span class="k">S</span><span class="k">D</span>
+      &nbsp;|&nbsp; Sprint: <span class="k">Shift</span>
+      &nbsp;|&nbsp; Jump: <span class="k">Space</span><br/>
+      Look: <span class="k">Mouse</span>
+      &nbsp;|&nbsp; Release mouse: <span class="k">Esc</span><br/><br/>
+      Goal: wander paths + trees, then look up at the star dome.
     </div>
   </div>
-  <div id="wrap">
-    <canvas id="c" width="960" height="540"></canvas>
-  </div>
+  <div id="hint">Tip: the “sky” is a star dome. Later you can add constellations, moon phase, latitude, etc.</div>
 
-<script>
-(() => {
-  const canvas = document.getElementById("c");
-  const ctx = canvas.getContext("2d");
+  <script type="module">
+    import * as THREE from "three";
+    import { PointerLockControls } from "three/addons/controls/PointerLockControls.js";
 
-  // --- Camera / world ---
-  const TILE = 32;
-  const WORLD_W = 120;   // tiles
-  const WORLD_H = 120;   // tiles
+    // --- Scene setup ---
+    const scene = new THREE.Scene();
+    scene.fog = new THREE.Fog(0x05070c, 30, 220);
 
-  // Simple seeded RNG for deterministic world generation
-  function mulberry32(seed) {
-    return function() {
-      let t = seed += 0x6D2B79F5;
-      t = Math.imul(t ^ (t >>> 15), t | 1);
-      t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
-      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-    };
-  }
-  const rand = mulberry32(123456);
+    const camera = new THREE.PerspectiveCamera(70, innerWidth / innerHeight, 0.1, 2000);
+    camera.position.set(0, 1.7, 6);
 
-  // Tiles: 0 grass, 1 path
-  const tiles = new Uint8Array(WORLD_W * WORLD_H);
+    const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: "high-performance" });
+    renderer.setSize(innerWidth, innerHeight);
+    renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+    document.body.appendChild(renderer.domElement);
 
-  // Make a couple wide "paths" using random walk
-  function idx(x,y){ return y * WORLD_W + x; }
+    // --- Pointer lock controls (mouse look + forward direction) ---
+    const controls = new PointerLockControls(camera, renderer.domElement);
+    scene.add(controls.getObject());
 
-  function carvePath(x, y, steps) {
-    let dir = 0;
-    for (let i=0; i<steps; i++) {
-      // occasionally turn
-      if (rand() < 0.08) dir = (dir + (rand()<0.5 ? -1 : 1) + 4) % 4;
+    const overlay = document.getElementById("overlay");
+    overlay.addEventListener("click", () => controls.lock());
+    controls.addEventListener("lock", () => overlay.style.display = "none");
+    controls.addEventListener("unlock", () => overlay.style.display = "grid");
 
-      // move
-      if (dir === 0) x++;
-      if (dir === 1) y++;
-      if (dir === 2) x--;
-      if (dir === 3) y--;
+    // --- Lights ---
+    scene.add(new THREE.AmbientLight(0x9fb6ff, 0.25));
 
-      x = Math.max(2, Math.min(WORLD_W-3, x));
-      y = Math.max(2, Math.min(WORLD_H-3, y));
+    const moonLight = new THREE.DirectionalLight(0xcfe2ff, 0.55);
+    moonLight.position.set(40, 80, 10);
+    scene.add(moonLight);
 
-      // carve a 3x3-ish path thickness
-      for (let oy=-1; oy<=1; oy++){
-        for (let ox=-1; ox<=1; ox++){
-          const xx = x+ox, yy = y+oy;
-          tiles[idx(xx,yy)] = 1;
-        }
+    const warmFill = new THREE.DirectionalLight(0xffd9a6, 0.15);
+    warmFill.position.set(-30, 25, -40);
+    scene.add(warmFill);
+
+    // --- Ground ---
+    const groundGeo = new THREE.PlaneGeometry(500, 500, 1, 1);
+    const groundMat = new THREE.MeshStandardMaterial({ color: 0x2f6b3a, roughness: 1.0 });
+    const ground = new THREE.Mesh(groundGeo, groundMat);
+    ground.rotation.x = -Math.PI / 2;
+    ground.receiveShadow = false;
+    scene.add(ground);
+
+    // Subtle ground variation (cheap: a few darker patches)
+    function addPatch(x, z, r, color) {
+      const g = new THREE.CircleGeometry(r, 24);
+      const m = new THREE.MeshStandardMaterial({ color, roughness: 1.0 });
+      const p = new THREE.Mesh(g, m);
+      p.rotation.x = -Math.PI / 2;
+      p.position.set(x, 0.01, z);
+      scene.add(p);
+    }
+    for (let i=0;i<70;i++){
+      addPatch((Math.random()-0.5)*350, (Math.random()-0.5)*350, 6+Math.random()*14, 0x2b5f34);
+    }
+
+    // --- Paths (simple strips) ---
+    const pathMat = new THREE.MeshStandardMaterial({ color: 0xa58b5a, roughness: 1.0 });
+    function addPathSegment(x, z, w, l, rotY=0) {
+      const seg = new THREE.Mesh(new THREE.BoxGeometry(w, 0.08, l), pathMat);
+      seg.position.set(x, 0.04, z);
+      seg.rotation.y = rotY;
+      scene.add(seg);
+      return seg;
+    }
+
+    // Make a few meandering paths
+    function carvePath(startX, startZ, steps, stepLen) {
+      let x = startX, z = startZ;
+      let ang = Math.random() * Math.PI * 2;
+      for (let i=0;i<steps;i++){
+        if (Math.random() < 0.12) ang += (Math.random()-0.5)*1.2;
+        const nx = x + Math.cos(ang) * stepLen;
+        const nz = z + Math.sin(ang) * stepLen;
+        const midX = (x + nx)/2;
+        const midZ = (z + nz)/2;
+        const rot = Math.atan2(nz - z, nx - x);
+        addPathSegment(midX, midZ, 5.0, stepLen + 0.5, -rot);
+        x = nx; z = nz;
       }
     }
-  }
+    carvePath(-60, 20, 75, 7);
+    carvePath(40, -30, 75, 7);
+    carvePath(0, 0, 55, 8);
 
-  // Carve a few paths
-  carvePath(Math.floor(WORLD_W*0.2), Math.floor(WORLD_H*0.6), 900);
-  carvePath(Math.floor(WORLD_W*0.7), Math.floor(WORLD_H*0.3), 900);
-  carvePath(Math.floor(WORLD_W*0.5), Math.floor(WORLD_H*0.5), 900);
+    // --- Trees (cylinder trunk + cone canopy) ---
+    const trunkMat = new THREE.MeshStandardMaterial({ color: 0x5b3a22, roughness: 1.0 });
+    const leafMat = new THREE.MeshStandardMaterial({ color: 0x1f4f2c, roughness: 1.0 });
 
-  // Place trees (simple circles), avoid paths
-  const trees = [];
-  for (let i=0; i<1800; i++){
-    const x = Math.floor(rand()*WORLD_W);
-    const y = Math.floor(rand()*WORLD_H);
-    if (tiles[idx(x,y)] === 1) continue;
-    // keep some open-ish space
-    if (rand() < 0.35) continue;
-    trees.push({x, y, r: 0.35 + rand()*0.35});
-  }
+    function addTree(x, z, s=1) {
+      const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.18*s, 0.22*s, 1.4*s, 10), trunkMat);
+      trunk.position.set(x, 0.7*s, z);
 
-  // --- Player ---
-  const player = {
-    x: WORLD_W * TILE * 0.5,
-    y: WORLD_H * TILE * 0.5,
-    r: 11,
-    speed: 170 // px/sec
-  };
+      const canopy = new THREE.Mesh(new THREE.ConeGeometry(1.0*s, 2.2*s, 10), leafMat);
+      canopy.position.set(x, 2.0*s, z);
 
-  // --- Input ---
-  const keys = new Set();
-  window.addEventListener("keydown", (e) => {
-    if (e.repeat) return;
-    keys.add(e.key.toLowerCase());
-    if (e.key === " ") { e.preventDefault(); starView = !starView; }
-    if (e.key.toLowerCase() === "m") { showMap = !showMap; }
-  });
-  window.addEventListener("keyup", (e) => keys.delete(e.key.toLowerCase()));
+      // small highlight blob to give some depth
+      const hi = new THREE.Mesh(new THREE.SphereGeometry(0.45*s, 10, 10),
+        new THREE.MeshStandardMaterial({ color: 0x2f6b3a, roughness: 1.0 })
+      );
+      hi.position.set(x-0.35*s, 2.2*s, z-0.25*s);
 
-  // --- View toggles ---
-  let starView = false;
-  let showMap = false;
+      scene.add(trunk, canopy, hi);
+    }
 
-  // --- Stars ---
-  const stars = [];
-  const STAR_COUNT = 700;
-  const starRand = mulberry32(99999);
-  for (let i=0;i<STAR_COUNT;i++){
-    // distribute on a disk, bias outward a bit
-    const a = starRand()*Math.PI*2;
-    const r = Math.pow(starRand(), 0.45); // bias
-    stars.push({
-      a,
-      r,
-      m: 0.4 + starRand()*0.6, // magnitude-ish
-      tw: starRand()*Math.PI*2
+    // Scatter trees, but keep a loose “path corridor” clearer
+    function nearAnyPath(x, z) {
+      // crude: just keep a few hardcoded corridors for this demo
+      const corridors = [
+        {x:-60, z:20, r:22},
+        {x:40, z:-30, r:22},
+        {x:0, z:0, r:20}
+      ];
+      for (const c of corridors) {
+        const dx = x - c.x, dz = z - c.z;
+        if ((dx*dx + dz*dz) < (c.r*c.r)) return true;
+      }
+      return false;
+    }
+
+    for (let i=0;i<650;i++){
+      const x = (Math.random()-0.5)*360;
+      const z = (Math.random()-0.5)*360;
+      if (nearAnyPath(x,z) && Math.random() < 0.75) continue;
+      addTree(x, z, 0.75 + Math.random()*0.9);
+    }
+
+    // --- Star dome (Points on a big sphere) ---
+    function makeStarDome() {
+      const starCount = 2400;
+      const positions = new Float32Array(starCount * 3);
+      const colors = new Float32Array(starCount * 3);
+
+      const radius = 900; // huge dome
+      const color = new THREE.Color();
+
+      for (let i=0;i<starCount;i++){
+        // random direction, but bias toward "upper hemisphere"
+        // (so stars are mostly above horizon)
+        const u = Math.random();
+        const v = Math.random();
+        const theta = 2 * Math.PI * u;
+        const phi = Math.acos(THREE.MathUtils.lerp(0.05, 1.0, v)); // 0..pi/2-ish
+        // convert to direction
+        const x = Math.sin(phi) * Math.cos(theta);
+        const y = Math.cos(phi); // up
+        const z = Math.sin(phi) * Math.sin(theta);
+
+        positions[i*3+0] = x * radius;
+        positions[i*3+1] = y * radius;
+        positions[i*3+2] = z * radius;
+
+        // color temperature-ish (slight blue/white variation)
+        const t = Math.random();
+        color.setRGB(
+          THREE.MathUtils.lerp(0.85, 1.0, t),
+          THREE.MathUtils.lerp(0.90, 1.0, t),
+          THREE.MathUtils.lerp(0.95, 1.0, 1-t)
+        );
+        colors[i*3+0] = color.r;
+        colors[i*3+1] = color.g;
+        colors[i*3+2] = color.b;
+      }
+
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+      geo.setAttribute("color", new THREE.BufferAttribute(colors, 3));
+
+      const mat = new THREE.PointsMaterial({
+        size: 2.0,
+        sizeAttenuation: true,
+        vertexColors: true,
+        transparent: true,
+        opacity: 0.9,
+        depthWrite: false
+      });
+
+      const points = new THREE.Points(geo, mat);
+      points.frustumCulled = false;
+      return points;
+    }
+
+    const starDome = makeStarDome();
+    scene.add(starDome);
+
+    // Also add a subtle dark sky gradient as a huge sphere behind stars
+    const skyGeo = new THREE.SphereGeometry(950, 32, 16);
+    const skyMat = new THREE.MeshBasicMaterial({ color: 0x04060a, side: THREE.BackSide });
+    const sky = new THREE.Mesh(skyGeo, skyMat);
+    scene.add(sky);
+
+    // --- Movement / simple physics ---
+    const key = { w:false,a:false,s:false,d:false, shift:false, space:false };
+    addEventListener("keydown", (e) => {
+      const k = e.key.toLowerCase();
+      if (k==="w") key.w = true;
+      if (k==="a") key.a = true;
+      if (k==="s") key.s = true;
+      if (k==="d") key.d = true;
+      if (k==="shift") key.shift = true;
+      if (k===" ") key.space = true;
     });
-  }
-  // A simple "constellation" (indices into stars)
-  const constellation = [12, 98, 201, 307, 402, 511, 615];
+    addEventListener("keyup", (e) => {
+      const k = e.key.toLowerCase();
+      if (k==="w") key.w = false;
+      if (k==="a") key.a = false;
+      if (k==="s") key.s = false;
+      if (k==="d") key.d = false;
+      if (k==="shift") key.shift = false;
+      if (k===" ") key.space = false;
+    });
 
-  // --- Render helpers ---
-  function clamp(v,a,b){ return Math.max(a, Math.min(b, v)); }
+    let velocityY = 0;
+    let onGround = true;
 
-  function drawTile(x, y, t, camX, camY) {
-    const sx = x*TILE - camX;
-    const sy = y*TILE - camY;
+    const clock = new THREE.Clock();
 
-    if (t === 0) {
-      // grass
-      ctx.fillStyle = "#2f6b3a";
-      ctx.fillRect(sx, sy, TILE, TILE);
+    function animate() {
+      const dt = Math.min(clock.getDelta(), 0.033);
 
-      // little grass noise
-      if (((x*31 + y*17) & 7) === 0) {
-        ctx.fillStyle = "rgba(255,255,255,0.03)";
-        ctx.fillRect(sx+6, sy+10, 2, 6);
-      }
-    } else {
-      // path
-      ctx.fillStyle = "#a58b5a";
-      ctx.fillRect(sx, sy, TILE, TILE);
-      ctx.fillStyle = "rgba(0,0,0,0.12)";
-      ctx.fillRect(sx, sy+TILE-3, TILE, 3);
-    }
-  }
+      // slow rotation of star dome (feels like sky drift)
+      starDome.rotation.y += dt * 0.02;
 
-  function drawTree(tx, ty, rr, camX, camY) {
-    const cx = tx*TILE + TILE/2 - camX;
-    const cy = ty*TILE + TILE/2 - camY;
+      if (controls.isLocked) {
+        const speed = key.shift ? 8.0 : 4.5;
 
-    // trunk
-    ctx.fillStyle = "#5b3a22";
-    ctx.fillRect(cx-2, cy+6, 4, 10);
+        // movement in camera-facing space, but keep it on XZ plane
+        const forward = new THREE.Vector3();
+        camera.getWorldDirection(forward);
+        forward.y = 0;
+        forward.normalize();
 
-    // canopy
-    ctx.beginPath();
-    ctx.fillStyle = "#1f4f2c";
-    ctx.arc(cx, cy+2, TILE*rr, 0, Math.PI*2);
-    ctx.fill();
+        const right = new THREE.Vector3().crossVectors(forward, new THREE.Vector3(0,1,0)).normalize();
 
-    // highlight
-    ctx.beginPath();
-    ctx.fillStyle = "rgba(255,255,255,0.07)";
-    ctx.arc(cx-6, cy-4, TILE*rr*0.55, 0, Math.PI*2);
-    ctx.fill();
-  }
+        const move = new THREE.Vector3();
+        if (key.w) move.add(forward);
+        if (key.s) move.sub(forward);
+        if (key.d) move.add(right);
+        if (key.a) move.sub(right);
 
-  function drawPlayer(camX, camY) {
-    const px = player.x - camX;
-    const py = player.y - camY;
-
-    ctx.beginPath();
-    ctx.fillStyle = "#2b2f38";
-    ctx.arc(px, py+2, player.r+2, 0, Math.PI*2);
-    ctx.fill();
-
-    ctx.beginPath();
-    ctx.fillStyle = "#d6caa8";
-    ctx.arc(px, py, player.r, 0, Math.PI*2);
-    ctx.fill();
-
-    // direction "nose" based on velocity last frame
-    ctx.beginPath();
-    ctx.fillStyle = "rgba(0,0,0,0.25)";
-    ctx.arc(px+6, py-2, 3, 0, Math.PI*2);
-    ctx.fill();
-  }
-
-  function drawStars(dt) {
-    ctx.fillStyle = "#05070c";
-    ctx.fillRect(0,0,canvas.width,canvas.height);
-
-    // slight rotation over time
-    starAngle += dt*0.07;
-
-    // horizon glow
-    const grd = ctx.createLinearGradient(0, canvas.height*0.55, 0, canvas.height);
-    grd.addColorStop(0, "rgba(0,0,0,0)");
-    grd.addColorStop(1, "rgba(20,40,70,0.25)");
-    ctx.fillStyle = grd;
-    ctx.fillRect(0,0,canvas.width,canvas.height);
-
-    // stars in a "dome"
-    const cx = canvas.width/2;
-    const cy = canvas.height*0.62;
-    const R = Math.min(canvas.width, canvas.height)*0.78;
-
-    for (let i=0;i<stars.length;i++){
-      const s = stars[i];
-      const a = s.a + starAngle;
-      const rr = s.r;
-
-      const x = cx + Math.cos(a) * rr * R;
-      const y = cy - Math.sin(a) * rr * R; // up
-
-      // twinkle
-      s.tw += dt*(0.6 + s.m*0.5);
-      const tw = (Math.sin(s.tw)*0.5 + 0.5);
-
-      const size = 0.6 + (1.9 * (1 - s.m)) + tw*0.6;
-      const alpha = 0.25 + (1 - s.m)*0.55 + tw*0.15;
-
-      ctx.fillStyle = `rgba(220,235,255,${alpha})`;
-      ctx.fillRect(x, y, size, size);
-    }
-
-    // draw a simple constellation line
-    ctx.lineWidth = 1.5;
-    ctx.strokeStyle = "rgba(160,200,255,0.45)";
-    ctx.beginPath();
-    for (let k=0;k<constellation.length;k++){
-      const s = stars[constellation[k]];
-      const a = s.a + starAngle;
-      const rr = s.r;
-      const x = cx + Math.cos(a) * rr * R;
-      const y = cy - Math.sin(a) * rr * R;
-      if (k===0) ctx.moveTo(x,y); else ctx.lineTo(x,y);
-    }
-    ctx.stroke();
-
-    // little caption
-    ctx.fillStyle = "rgba(255,255,255,0.85)";
-    ctx.font = "16px ui-sans-serif, system-ui";
-    ctx.fillText("Star view (press Space to return)", 20, 32);
-    ctx.fillStyle = "rgba(255,255,255,0.6)";
-    ctx.font = "13px ui-sans-serif, system-ui";
-    ctx.fillText("Imagine you learn these constellations to orient yourself.", 20, 52);
-  }
-
-  function drawVagueMap() {
-    // Vague map: shows only major paths as abstract blobs; no player marker.
-    const pad = 18;
-    const w = 260, h = 180;
-    const x0 = canvas.width - w - pad;
-    const y0 = pad;
-
-    ctx.save();
-    ctx.globalAlpha = 0.92;
-    ctx.fillStyle = "rgba(0,0,0,0.45)";
-    ctx.fillRect(x0, y0, w, h);
-    ctx.strokeStyle = "rgba(255,255,255,0.15)";
-    ctx.strokeRect(x0, y0, w, h);
-
-    ctx.fillStyle = "rgba(255,255,255,0.85)";
-    ctx.font = "13px ui-sans-serif, system-ui";
-    ctx.fillText("Map (deliberately vague)", x0+10, y0+20);
-
-    // Downsample world to a mini-grid and draw only path density
-    const miniW = 52, miniH = 30;
-    const cellW = (w-20)/miniW;
-    const cellH = (h-40)/miniH;
-
-    for (let my=0; my<miniH; my++){
-      for (let mx=0; mx<miniW; mx++){
-        // sample a block
-        const sx = Math.floor(mx/miniW * WORLD_W);
-        const sy = Math.floor(my/miniH * WORLD_H);
-
-        // small neighborhood density
-        let count = 0;
-        for (let oy=0; oy<2; oy++){
-          for (let ox=0; ox<2; ox++){
-            const xx = clamp(sx+ox,0,WORLD_W-1);
-            const yy = clamp(sy+oy,0,WORLD_H-1);
-            if (tiles[idx(xx,yy)] === 1) count++;
-          }
+        if (move.lengthSq() > 0) {
+          move.normalize().multiplyScalar(speed * dt);
+          controls.getObject().position.add(move);
         }
-        if (count === 0) continue;
 
-        const a = 0.08 + count*0.06;
-        ctx.fillStyle = `rgba(220,200,150,${a})`;
-        ctx.fillRect(x0+10 + mx*cellW, y0+30 + my*cellH, cellW, cellH);
-      }
-    }
+        // keep player roughly within the world
+        const p = controls.getObject().position;
+        p.x = THREE.MathUtils.clamp(p.x, -240, 240);
+        p.z = THREE.MathUtils.clamp(p.z, -240, 240);
 
-    ctx.fillStyle = "rgba(255,255,255,0.55)";
-    ctx.font = "12px ui-sans-serif, system-ui";
-    ctx.fillText("No 'you are here'. Learn landmarks + stars.", x0+10, y0+h-10);
+        // jump + gravity
+        if (key.space && onGround) {
+          velocityY = 5.2;
+          onGround = false;
+        }
+        velocityY -= 9.8 * dt;
+        p.y += velocityY * dt;
 
-    ctx.restore();
-  }
-
-  // --- Main loop ---
-  let last = performance.now();
-  let starAngle = 0;
-
-  function tick(now) {
-    const dt = Math.min(0.033, (now - last) / 1000);
-    last = now;
-
-    if (!starView) {
-      // movement
-      let vx = 0, vy = 0;
-      const up = keys.has("w") || keys.has("arrowup");
-      const dn = keys.has("s") || keys.has("arrowdown");
-      const lf = keys.has("a") || keys.has("arrowleft");
-      const rt = keys.has("d") || keys.has("arrowright");
-
-      if (up) vy -= 1;
-      if (dn) vy += 1;
-      if (lf) vx -= 1;
-      if (rt) vx += 1;
-
-      if (vx || vy) {
-        const len = Math.hypot(vx, vy);
-        vx /= len; vy /= len;
-        player.x += vx * player.speed * dt;
-        player.y += vy * player.speed * dt;
-      }
-
-      // clamp to world bounds
-      player.x = clamp(player.x, 12, WORLD_W*TILE - 12);
-      player.y = clamp(player.y, 12, WORLD_H*TILE - 12);
-
-      // camera centers on player
-      const camX = clamp(player.x - canvas.width/2, 0, WORLD_W*TILE - canvas.width);
-      const camY = clamp(player.y - canvas.height/2, 0, WORLD_H*TILE - canvas.height);
-
-      // background
-      ctx.fillStyle = "#1a2a22";
-      ctx.fillRect(0,0,canvas.width,canvas.height);
-
-      // visible tile range
-      const xStart = Math.floor(camX / TILE) - 1;
-      const yStart = Math.floor(camY / TILE) - 1;
-      const xEnd = xStart + Math.ceil(canvas.width / TILE) + 3;
-      const yEnd = yStart + Math.ceil(canvas.height / TILE) + 3;
-
-      for (let y=yStart; y<yEnd; y++){
-        if (y<0 || y>=WORLD_H) continue;
-        for (let x=xStart; x<xEnd; x++){
-          if (x<0 || x>=WORLD_W) continue;
-          drawTile(x, y, tiles[idx(x,y)], camX, camY);
+        // ground collision
+        if (p.y <= 1.7) {
+          p.y = 1.7;
+          velocityY = 0;
+          onGround = true;
         }
       }
 
-      // draw trees (cheap cull)
-      for (const t of trees) {
-        const px = t.x*TILE - camX;
-        const py = t.y*TILE - camY;
-        if (px < -TILE || py < -TILE || px > canvas.width+TILE || py > canvas.height+TILE) continue;
-        drawTree(t.x, t.y, t.r, camX, camY);
-      }
-
-      // player
-      drawPlayer(camX, camY);
-
-      // subtle vignette
-      const g = ctx.createRadialGradient(canvas.width/2, canvas.height/2, canvas.height*0.15, canvas.width/2, canvas.height/2, canvas.height*0.65);
-      g.addColorStop(0, "rgba(0,0,0,0)");
-      g.addColorStop(1, "rgba(0,0,0,0.35)");
-      ctx.fillStyle = g;
-      ctx.fillRect(0,0,canvas.width,canvas.height);
-
-      if (showMap) drawVagueMap();
-
-      // label
-      ctx.fillStyle = "rgba(255,255,255,0.85)";
-      ctx.font = "16px ui-sans-serif, system-ui";
-      ctx.fillText("Exploration view", 20, canvas.height - 22);
-      ctx.fillStyle = "rgba(255,255,255,0.6)";
-      ctx.font = "13px ui-sans-serif, system-ui";
-      ctx.fillText("Try navigating using paths + tree clusters. Star view is separate (Space).", 20, canvas.height - 5);
-
-    } else {
-      drawStars(dt);
+      renderer.render(scene, camera);
+      requestAnimationFrame(animate);
     }
+    animate();
 
-    requestAnimationFrame(tick);
-  }
+    // --- Resize ---
+    addEventListener("resize", () => {
+      camera.aspect = innerWidth / innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(innerWidth, innerHeight);
+      renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+    });
 
-  requestAnimationFrame(tick);
-})();
-</script>
+  </script>
 </body>
 </html>
